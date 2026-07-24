@@ -37,18 +37,15 @@ test("persists the approved Huntley workflow from request through Service Proof"
     page.getByRole("heading", { name: "Choose the strongest route fit" }),
   ).toBeVisible();
 
-  await page
-    .getByRole("button", { name: /Andre Silva · 24 min drive/ })
-    .click();
   await clickAndConfirmWorkflow(
     page,
-    page.getByRole("button", { name: "Approve Today · 3:45 PM" }),
+    page.getByRole("button", { name: "Approve Today · 1:30 PM" }),
   );
 
   await expect(
     page.getByRole("heading", { name: "Rodent entry-point inspection" }),
   ).toBeVisible();
-  await expect(page.getByText(/Assignment SC-2402 · TECH-07/)).toBeVisible();
+  await expect(page.getByText(/Assignment SC-2401 · TECH-04/)).toBeVisible();
 
   await clickAndConfirmWorkflow(
     page,
@@ -61,33 +58,42 @@ test("persists the approved Huntley workflow from request through Service Proof"
   const checklist = page.getByRole("checkbox");
   await expect(checklist).toHaveCount(4);
   for (let index = 0; index < 4; index += 1) {
-    await clickAndConfirmWorkflow(page, checklist.nth(index), true);
+    await checkAndConfirmWorkflowStep(page, checklist.nth(index), index);
     await expect(checklist.nth(index)).toBeChecked();
   }
 
-  await clickAndConfirmEvidence(
+  const evidenceInput = page.locator('input[type="file"]');
+  await uploadAndConfirmEvidence(
     page,
-    page.getByRole("button", {
-      name: /Create & upload sample overview PNG/,
-    }),
+    evidenceInput,
+    "fieldproof-before.png",
+    BEFORE_PNG,
   );
   await expect(page.getByText("1 / 2 min.")).toBeVisible();
 
-  await clickAndConfirmEvidence(
+  await page.getByLabel("Capture phase").selectOption("DURING");
+  await page.getByLabel("Evidence subject").selectOption("ENTRY_POINT");
+  await page
+    .getByLabel("Caption")
+    .fill("North sill-plate entry point inspected and documented.");
+  await uploadAndConfirmEvidence(
     page,
-    page.getByRole("button", {
-      name: /Create & upload sample detail PNG/,
-    }),
+    evidenceInput,
+    "fieldproof-entry-point.png",
+    ENTRY_POINT_PNG,
   );
   await expect(page.getByText("2 / 2 min.")).toBeVisible();
+  await expect(
+    page.getByText("Passed Typed evidence policy", { exact: false }),
+  ).toBeVisible();
 
   await clickAndConfirmWorkflow(
     page,
-    page.getByRole("button", { name: "Record sample observation" }),
+    page.getByRole("button", { name: "Save field observation" }),
   );
   await expect(
     page.getByText(
-      "Small dark droppings observed along north basement sill plate.",
+      "Small dark droppings observed along the north basement sill plate.",
     ),
   ).toBeVisible();
 
@@ -101,22 +107,111 @@ test("persists the approved Huntley workflow from request through Service Proof"
 
   await clickAndConfirmWorkflow(
     page,
-    page.getByRole("button", { name: "Complete job & generate proof" }),
+    page.getByRole("button", {
+      name: "Mark field work complete & generate proof",
+    }),
   );
   await expect(
-    page.getByRole("heading", { name: "Server-confirmed report" }),
+    page.getByRole("heading", { name: "Immutable field record" }),
   ).toBeVisible();
-  await expect(page.getByText("Andre Silva", { exact: true })).toBeVisible();
+  await expect(page.getByText("Maya Chen", { exact: true })).toBeVisible();
   await expect(page.getByText("47/100 · Moderate")).toBeVisible();
-  await expect(page.getByText("Follow-up created", { exact: true })).toHaveCount(2);
+  await expect(page.getByText("Pending verification", { exact: true })).toBeVisible();
+  await expect(page.getByText("No resolution claim yet")).toBeVisible();
 
   await clickAndConfirmWorkflow(
     page,
     page.getByRole("button", { name: "Queue Service Proof delivery" }),
   );
+  await clickAndConfirm(
+    page,
+    page.getByRole("button", { name: "Process mock delivery" }),
+    "/api/v1/outbox",
+  );
   await expect(
-    page.getByRole("button", { name: "Delivery queued" }),
+    page.getByRole("button", { name: "Delivered" }),
   ).toBeDisabled();
+
+  const pendingVerificationResponse = await page.request.get(
+    "/api/v1/workflow",
+  );
+  const pendingVerification = (await pendingVerificationResponse.json()) as {
+    data: { version: number };
+  };
+  const forgedDirectConfirmation = {
+    type: "VERIFY_OUTCOME",
+    commandId: `e2e-forged-customer-${crypto.randomUUID()}`,
+    expectedVersion: pendingVerification.data.version,
+    result: "RESOLVED",
+    source: "CUSTOMER_CONFIRMATION",
+    note: "This direct signal has no trusted provider receipt.",
+  };
+  const forgedDirectResponse = await page.request.post("/api/v1/workflow", {
+    data: forgedDirectConfirmation,
+    headers: {
+      "Idempotency-Key": forgedDirectConfirmation.commandId,
+    },
+  });
+  expect(forgedDirectResponse.status()).toBe(422);
+  await expect(forgedDirectResponse.json()).resolves.toMatchObject({
+    error: { code: "TRUSTED_SOURCE_REQUIRED" },
+  });
+
+  const selfAttestation = {
+    ...forgedDirectConfirmation,
+    commandId: `e2e-self-attestation-${crypto.randomUUID()}`,
+    source: "STAFF_RECORDED_CUSTOMER_CONFIRMATION",
+  };
+  const selfAttestationResponse = await page.request.post(
+    "/api/v1/workflow",
+    {
+      data: selfAttestation,
+      headers: { "Idempotency-Key": selfAttestation.commandId },
+    },
+  );
+  expect(selfAttestationResponse.status()).toBe(409);
+
+  await clickAndConfirmWorkflow(
+    page,
+    page.getByRole("button", {
+      name: "Attest to customer-confirmed outcome",
+    }),
+  );
+  await expect(
+    page.getByRole("heading", { name: "Verified: Resolved" }),
+  ).toBeVisible();
+
+  const verifiedResponse = await page.request.get("/api/v1/workflow");
+  const verifiedSnapshot = (await verifiedResponse.json()) as {
+    data: { version: number; jobId: string };
+  };
+  const selfReservice = {
+    type: "RECORD_RESERVICE",
+    commandId: `e2e-self-reservice-${crypto.randomUUID()}`,
+    expectedVersion: verifiedSnapshot.data.version,
+    reserviceJobId: verifiedSnapshot.data.jobId,
+    reason: "A job may not be its own reservice.",
+    directCostCents: 4_500,
+  };
+  const selfReserviceResponse = await page.request.post(
+    "/api/v1/workflow",
+    {
+      data: selfReservice,
+      headers: { "Idempotency-Key": selfReservice.commandId },
+    },
+  );
+  expect(selfReserviceResponse.status()).toBe(409);
+
+  await clickAndConfirmWorkflow(
+    page,
+    page.getByRole("button", { name: "Link reservice" }),
+  );
+  await expect(
+    page.getByText("$45.00 linked reservice cost"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Reservice required", { exact: true }).first(),
+  ).toBeVisible();
 
   await page.reload();
   await expect(
@@ -125,16 +220,35 @@ test("persists the approved Huntley workflow from request through Service Proof"
   await expect(page.getByText("Completed", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: /Job JOB-2048 · Huntley/ }).click();
   await expect(
-    page.getByRole("heading", { name: "Server-confirmed report" }),
+    page.getByRole("heading", { name: "Immutable field record" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Delivery queued" }),
+    page.getByRole("button", { name: "Delivered" }),
   ).toBeDisabled();
 
   await page.getByRole("button", { name: /Exceptions/ }).click();
+  const unresolvedExceptionResponse = await page.request.get(
+    "/api/v1/workflow",
+  );
+  const unresolvedException = (await unresolvedExceptionResponse.json()) as {
+    data: { version: number };
+  };
+  const invalidOwnerCommand = {
+    type: "RESOLVE_EXCEPTION",
+    commandId: `e2e-invalid-owner-${crypto.randomUUID()}`,
+    expectedVersion: unresolvedException.data.version,
+    ownerUserId: "USER-NOT-A-MEMBER",
+    resolutionNote: "This user is not an active tenant member.",
+  };
+  const invalidOwnerResponse = await page.request.post("/api/v1/workflow", {
+    data: invalidOwnerCommand,
+    headers: { "Idempotency-Key": invalidOwnerCommand.commandId },
+  });
+  expect(invalidOwnerResponse.status()).toBe(409);
+
   await clickAndConfirmWorkflow(
     page,
-    page.getByRole("button", { name: "Assign & resolve" }),
+    page.getByRole("button", { name: "Assign owner & resolve" }),
   );
   await expect(page.getByText("Resolved", { exact: true })).toBeVisible();
 
@@ -209,8 +323,38 @@ async function clickAndConfirmWorkflow(
   return clickAndConfirm(page, locator, "/api/v1/workflow", force);
 }
 
-async function clickAndConfirmEvidence(page: Page, locator: Locator) {
-  return clickAndConfirm(page, locator, "/api/v1/evidence");
+async function checkAndConfirmWorkflowStep(
+  page: Page,
+  locator: Locator,
+  index: number,
+) {
+  const responsePromise = page.waitForResponse((response) => {
+    if (
+      new URL(response.url()).pathname !== "/api/v1/workflow" ||
+      response.request().method() !== "POST"
+    ) {
+      return false;
+    }
+    const command = response.request().postDataJSON() as
+      | { type?: string; index?: number }
+      | null;
+    return command?.type === "SET_CHECKLIST_STEP" && command.index === index;
+  });
+  await locator.click({ force: true });
+  const response = await responsePromise;
+  expect(
+    response.ok(),
+    `/api/v1/workflow returned ${response.status()}: ${await response.text()}`,
+  ).toBe(true);
+  await expect
+    .poll(async () => {
+      const workflow = await page.request.get("/api/v1/workflow");
+      const body = (await workflow.json()) as {
+        data?: { checklist?: boolean[] };
+      };
+      return body.data?.checklist?.[index];
+    })
+    .toBe(true);
 }
 
 async function clickAndConfirm(
@@ -234,3 +378,36 @@ async function clickAndConfirm(
   expect(body.data).toBeTruthy();
   return body.data;
 }
+
+async function uploadAndConfirmEvidence(
+  page: Page,
+  input: Locator,
+  name: string,
+  buffer: Buffer,
+) {
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/evidence" &&
+      response.request().method() === "POST",
+  );
+  await input.setInputFiles({
+    name,
+    mimeType: "image/png",
+    buffer,
+  });
+  const response = await responsePromise;
+  expect(
+    response.ok(),
+    `/api/v1/evidence returned ${response.status()}: ${await response.text()}`,
+  ).toBe(true);
+}
+
+const BEFORE_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+const ENTRY_POINT_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Z8Z8AAAAASUVORK5CYII=",
+  "base64",
+);

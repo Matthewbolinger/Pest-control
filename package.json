@@ -1,6 +1,6 @@
 {
   "name": "fieldproof",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit",
     "evals": "vitest run tests/ai-evals.test.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "verify:release": "node scripts/verify-release-provenance.mjs",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

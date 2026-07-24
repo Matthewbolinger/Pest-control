@@ -4,7 +4,8 @@ import path from "node:path";
 
 const root = process.cwd();
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const stateRoot = ".wrangler/e2e-state";
+const stateRoot =
+  process.env.FIELDPROOF_E2E_STATE ?? ".wrangler/e2e-state";
 const configPath = "dist/server/wrangler.e2e.json";
 const e2eEnvironment = {
   ...process.env,

@@ -15,17 +15,28 @@ import {
   type WorkflowSnapshot,
 } from "@/packages/application/workflow";
 import {
+  authorizePermission,
+  contextDenied,
   getRequestContext,
   isCrossSiteMutation,
-  unauthorized,
   type RequestContext,
 } from "@/app/api/v1/request-context";
 
 const Metadata = z
   .object({
-    jobId: z.literal(FIELDPROOF_DEMO.jobId),
-    propertyId: z.literal(FIELDPROOF_DEMO.propertyId),
-    zoneId: z.enum(FIELDPROOF_DEMO.zoneIds),
+    jobId: z.string().trim().min(1).max(128),
+    propertyId: z.string().trim().min(1).max(128),
+    zoneId: z.string().trim().min(1).max(128),
+    phase: z.enum(["BEFORE", "DURING", "AFTER"]),
+    subject: z.enum([
+      "AREA_OVERVIEW",
+      "PEST_EVIDENCE",
+      "ENTRY_POINT",
+      "WORK_PERFORMED",
+      "OTHER",
+    ]),
+    caption: z.string().trim().max(240).nullable(),
+    capturedAt: z.coerce.number().int().nonnegative(),
   })
   .strict();
 
@@ -48,15 +59,21 @@ type EvidenceRow = {
   property_id: string;
   zone_id: string;
   object_key: string;
+  kind: "FIELD_PHOTO";
+  phase: EvidenceRecord["phase"];
+  subject: EvidenceRecord["subject"];
+  caption: string | null;
   content_type: SupportedEvidenceType;
   sha256: string;
   captured_at: number;
+  uploaded_at: number;
 };
 
 export async function GET(request: Request) {
   const correlationId = crypto.randomUUID();
-  const context = getRequestContext(request);
-  if (!context) return unauthorized(correlationId);
+  const resolution = await getRequestContext(request, env.DB);
+  if (!resolution.context) return contextDenied(resolution, correlationId);
+  const context = resolution.context;
 
   const id = EvidenceId.safeParse(new URL(request.url).searchParams.get("id"));
   if (!id.success) {
@@ -71,7 +88,8 @@ export async function GET(request: Request) {
   try {
     const row = await env.DB.prepare(
       `SELECT id, idempotency_key, job_id, property_id, zone_id, object_key,
-              content_type, sha256, captured_at
+              kind, phase, subject, caption, content_type, sha256, captured_at,
+              updated_at AS uploaded_at
        FROM evidence_assets
        WHERE organization_id = ? AND id = ?`,
     )
@@ -84,6 +102,23 @@ export async function GET(request: Request) {
         "EVIDENCE_NOT_FOUND",
         "The evidence record was not found.",
       );
+    }
+    const officeDenied = authorizePermission(
+      context,
+      "JOB_READ_ALL",
+      correlationId,
+    );
+    if (officeDenied) {
+      const assignedDenied = authorizePermission(
+        context,
+        "JOB_READ_ASSIGNED",
+        correlationId,
+        await assignedTechnicianForEvidence(
+          context.organizationId,
+          row.job_id,
+        ),
+      );
+      if (assignedDenied) return assignedDenied;
     }
 
     const object = await env.EVIDENCE.get(row.object_key);
@@ -119,8 +154,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const correlationId = crypto.randomUUID();
-  const context = getRequestContext(request);
-  if (!context) return unauthorized(correlationId);
+  const resolution = await getRequestContext(request, env.DB);
+  if (!resolution.context) return contextDenied(resolution, correlationId);
+  const context = resolution.context;
   if (isCrossSiteMutation(request)) {
     return apiError(
       403,
@@ -153,6 +189,13 @@ export async function POST(request: Request) {
     jobId: form.get("jobId"),
     propertyId: form.get("propertyId"),
     zoneId: form.get("zoneId"),
+    phase: form.get("phase"),
+    subject: form.get("subject"),
+    caption:
+      typeof form.get("caption") === "string" && form.get("caption")
+        ? form.get("caption")
+        : null,
+    capturedAt: form.get("capturedAt"),
   });
   if (
     !(file instanceof File) ||
@@ -161,6 +204,17 @@ export async function POST(request: Request) {
     file.size > MAXIMUM_EVIDENCE_BYTES
   ) {
     return invalidEvidence(correlationId);
+  }
+  if (
+    metadata.data.capturedAt > Date.now() + 5 * 60 * 1000 ||
+    metadata.data.capturedAt < Date.now() - 30 * 24 * 60 * 60 * 1000
+  ) {
+    return apiError(
+      400,
+      correlationId,
+      "INVALID_CAPTURE_TIME",
+      "Evidence capture time must be within the last 30 days and not in the future.",
+    );
   }
 
   const bytes = await file.arrayBuffer();
@@ -211,16 +265,52 @@ export async function POST(request: Request) {
         "Evidence requires an active, checked-in job with an assigned technician.",
       );
     }
+    if (
+      metadata.data.jobId !== current.jobId ||
+      metadata.data.propertyId !== current.propertyId
+    ) {
+      return apiError(
+        404,
+        correlationId,
+        "FIELD_RECORD_NOT_FOUND",
+        "The job, property, or zone was not found in the active organization.",
+      );
+    }
+    const relationshipsValid = await validateEvidenceRelationships(
+      context.organizationId,
+      metadata.data,
+      current.assignedTechnicianId,
+    );
+    if (!relationshipsValid) {
+      return apiError(
+        404,
+        correlationId,
+        "FIELD_RECORD_NOT_FOUND",
+        "The job, property, or zone was not found in the active organization.",
+      );
+    }
+    const denied = authorizePermission(
+      context,
+      "EVIDENCE_UPLOAD_ASSIGNED",
+      correlationId,
+      current.assignedTechnicianId,
+    );
+    if (denied) return denied;
 
     const id = `EV-${crypto.randomUUID()}`;
-    const capturedAt = Date.now();
+    const uploadedAt = Date.now();
+    const capturedAt = metadata.data.capturedAt;
     const commandId = `EVIDENCE:${idempotency.data}`;
     const record: EvidenceRecord = {
       id,
       kind: "FIELD_PHOTO",
+      phase: metadata.data.phase,
+      subject: metadata.data.subject,
+      caption: metadata.data.caption,
       contentType: detectedType,
       sha256,
       capturedAt,
+      uploadedAt,
       zoneId: metadata.data.zoneId,
     };
     let next: WorkflowSnapshot;
@@ -229,7 +319,7 @@ export async function POST(request: Request) {
         current,
         record,
         commandId,
-        new Date(capturedAt).toISOString(),
+        new Date(uploadedAt).toISOString(),
       );
     } catch (error) {
       if (error instanceof WorkflowTransitionError) {
@@ -252,6 +342,9 @@ export async function POST(request: Request) {
         propertyId: current.propertyId,
         zoneId: metadata.data.zoneId,
         technicianId: current.assignedTechnicianId,
+        phase: record.phase,
+        subject: record.subject,
+        capturedAt: String(record.capturedAt),
         sha256,
       },
     });
@@ -348,16 +441,22 @@ async function persistEvidence(input: {
     objectKey,
     correlationId,
   } = input;
-  const now = record.capturedAt;
+  const now = record.uploadedAt ?? Date.now();
   const commandId = `EVIDENCE:${idempotencyKey}`;
   const responseJson = JSON.stringify(next);
+  const storageId = workflowStorageId(
+    context.organizationId,
+    current.workflowId,
+  );
   return env.DB.batch([
     env.DB.prepare(
       `INSERT INTO evidence_assets
         (id, organization_id, idempotency_key, job_id, property_id, zone_id,
-         technician_id, object_key, kind, content_type, sha256, captured_at,
-         created_at, updated_at, version)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'FIELD_PHOTO', ?, ?, ?, ?, ?, 1
+         technician_id, object_key, kind, phase, subject, caption,
+         uploaded_by_user_id, content_type, sha256, captured_at, created_at,
+         updated_at, version)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'FIELD_PHOTO', ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, 1
        WHERE EXISTS (
          SELECT 1 FROM workflow_snapshots
          WHERE id = ? AND organization_id = ? AND version = ?
@@ -372,12 +471,16 @@ async function persistEvidence(input: {
       record.zoneId,
       current.assignedTechnicianId,
       objectKey,
+      record.phase,
+      record.subject,
+      record.caption,
+      context.actorId,
       record.contentType,
       record.sha256,
       record.capturedAt,
       now,
       now,
-      current.workflowId,
+      storageId,
       context.organizationId,
       current.version,
       current.assignedTechnicianId,
@@ -395,7 +498,7 @@ async function persistEvidence(input: {
       commandId,
       now,
       next.version,
-      current.workflowId,
+      storageId,
       context.organizationId,
       current.version,
       record.id,
@@ -414,19 +517,23 @@ async function persistEvidence(input: {
     ).bind(
       `WCR-${crypto.randomUUID()}`,
       context.organizationId,
-      current.workflowId,
+      storageId,
       commandId,
       JSON.stringify({
         idempotencyKey,
         jobId: current.jobId,
         propertyId: current.propertyId,
         zoneId: record.zoneId,
+        phase: record.phase,
+        subject: record.subject,
+        caption: record.caption,
+        capturedAt: record.capturedAt,
         sha256: record.sha256,
       }),
       responseJson,
       next.version,
       now,
-      current.workflowId,
+      storageId,
       context.organizationId,
       next.version,
       commandId,
@@ -451,11 +558,11 @@ async function persistEvidence(input: {
       current.jobId,
       now,
       correlationId,
-      `Evidence ${record.id} was attributed to ${current.assignedTechnicianId}.`,
+      `${record.phase} ${record.subject} evidence ${record.id} was attributed to ${current.assignedTechnicianId}.`,
       "evidence-ledger-v2",
       JSON.stringify(current),
       responseJson,
-      current.workflowId,
+      storageId,
       context.organizationId,
       next.version,
       commandId,
@@ -463,9 +570,10 @@ async function persistEvidence(input: {
     env.DB.prepare(
       `INSERT OR IGNORE INTO outbox_events
         (id, organization_id, event_type, entity_id, payload_json,
-         idempotency_key, status, attempts, available_at, created_at,
-         updated_at, version)
-       SELECT ?, ?, 'EVIDENCE_CAPTURED', ?, ?, ?, 'PENDING', 0, ?, ?, ?, 1
+         idempotency_key, status, attempts, available_at, last_error,
+         processed_at, created_at, updated_at, version)
+       SELECT ?, ?, 'EVIDENCE_CAPTURED', ?, ?, ?, 'PROCESSED', 1, ?, NULL,
+              ?, ?, ?, 1
        WHERE EXISTS (
          SELECT 1 FROM workflow_snapshots
          WHERE id = ? AND organization_id = ? AND version = ?
@@ -478,13 +586,16 @@ async function persistEvidence(input: {
       JSON.stringify({
         workflowId: current.workflowId,
         evidenceId: record.id,
+        phase: record.phase,
+        subject: record.subject,
         version: next.version,
       }),
       `${context.organizationId}:${current.workflowId}:${commandId}`,
       now,
       now,
       now,
-      current.workflowId,
+      now,
+      storageId,
       context.organizationId,
       next.version,
       commandId,
@@ -497,7 +608,7 @@ async function loadSnapshot(organizationId: string) {
     `SELECT snapshot_json, version FROM workflow_snapshots
      WHERE id = ? AND organization_id = ?`,
   )
-    .bind(FIELDPROOF_DEMO.workflowId, organizationId)
+    .bind(workflowStorageId(organizationId, FIELDPROOF_DEMO.workflowId), organizationId)
     .first<SnapshotRow>();
   if (!row) {
     throw new Error("The workflow must be loaded before evidence is captured.");
@@ -515,7 +626,8 @@ async function findEvidence(
 ) {
   return env.DB.prepare(
     `SELECT id, idempotency_key, job_id, property_id, zone_id, object_key,
-            content_type, sha256, captured_at
+            kind, phase, subject, caption, content_type, sha256, captured_at,
+            updated_at AS uploaded_at
      FROM evidence_assets
      WHERE organization_id = ? AND idempotency_key = ?`,
   )
@@ -532,6 +644,10 @@ function sameEvidenceRequest(
     row.job_id === metadata.jobId &&
     row.property_id === metadata.propertyId &&
     row.zone_id === metadata.zoneId &&
+    row.phase === metadata.phase &&
+    row.subject === metadata.subject &&
+    row.caption === metadata.caption &&
+    row.captured_at === metadata.capturedAt &&
     row.sha256 === sha256
   );
 }
@@ -545,10 +661,14 @@ function evidenceResponse(
   const record: EvidenceRecord = {
     id: row.id,
     kind: "FIELD_PHOTO",
+    phase: row.phase,
+    subject: row.subject,
+    caption: row.caption,
     contentType: row.content_type,
     sha256: row.sha256,
     capturedAt: row.captured_at,
-    zoneId: "ZONE-BASEMENT",
+    uploadedAt: row.uploaded_at,
+    zoneId: row.zone_id,
   };
   return Response.json({
     data: { record, snapshot },
@@ -576,4 +696,50 @@ function apiError(
     { error: { code, message, correlationId } },
     { status },
   );
+}
+
+async function assignedTechnicianForEvidence(
+  organizationId: string,
+  jobId: string,
+) {
+  const row = await env.DB.prepare(
+    `SELECT technician_id FROM jobs
+     WHERE organization_id = ? AND id = ?`,
+  )
+    .bind(organizationId, jobId)
+    .first<{ technician_id: string | null }>();
+  return row?.technician_id ?? null;
+}
+
+async function validateEvidenceRelationships(
+  organizationId: string,
+  metadata: z.infer<typeof Metadata>,
+  assignedTechnicianId: string,
+) {
+  const row = await env.DB.prepare(
+    `SELECT j.id
+     FROM jobs j
+     JOIN properties p
+       ON p.organization_id = j.organization_id
+      AND p.id = j.property_id
+     JOIN property_zones z
+       ON z.organization_id = p.organization_id
+      AND z.property_id = p.id
+     WHERE j.organization_id = ? AND j.id = ? AND p.id = ? AND z.id = ?
+       AND j.technician_id = ?
+     LIMIT 1`,
+  )
+    .bind(
+      organizationId,
+      metadata.jobId,
+      metadata.propertyId,
+      metadata.zoneId,
+      assignedTechnicianId,
+    )
+    .first();
+  return Boolean(row);
+}
+
+function workflowStorageId(organizationId: string, workflowId: string) {
+  return `${organizationId}:${workflowId}`;
 }

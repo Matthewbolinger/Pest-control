@@ -16,7 +16,7 @@ import {
   evidenceExtension,
 } from "../packages/application/evidence";
 import {
-  getRequestContext,
+  getRequestIdentity,
   isCrossSiteMutation,
 } from "../app/api/v1/request-context";
 
@@ -75,7 +75,7 @@ describe("server-authoritative workflow reducer", () => {
 
     expect(() =>
       transition(snapshot, { type: "COMPLETE_JOB" }),
-    ).toThrow("At least two persisted evidence records");
+    ).toThrow("Required evidence is missing");
   });
 
   it("completes a clear-risk job without manufacturing a follow-up", () => {
@@ -83,7 +83,8 @@ describe("server-authoritative workflow reducer", () => {
     snapshot = transition(snapshot, { type: "COMPLETE_JOB" });
 
     expect(snapshot.completed).toBe(true);
-    expect(snapshot.outcome).toBe("RESOLVED");
+    expect(snapshot.technicianAssessment).toBe("CLEAR");
+    expect(snapshot.outcome).toBe("PENDING_VERIFICATION");
     expect(snapshot.followUpCreated).toBe(false);
     expect(snapshot.proofGenerated).toBe(true);
     expect(snapshot.riskScore).toBe(32);
@@ -93,12 +94,92 @@ describe("server-authoritative workflow reducer", () => {
     let snapshot = fieldProofReady(true);
     snapshot = transition(snapshot, { type: "COMPLETE_JOB" });
 
-    expect(snapshot.outcome).toBe("PARTIALLY_RESOLVED");
+    expect(snapshot.technicianAssessment).toBe("OPEN_RISK");
+    expect(snapshot.outcome).toBe("PENDING_VERIFICATION");
     expect(snapshot.followUpCreated).toBe(true);
     expect(snapshot.riskScore).toBe(47);
 
     snapshot = transition(snapshot, { type: "SEND_PROOF" });
-    expect(snapshot.proofSent).toBe(true);
+    expect(snapshot.proofDeliveryStatus).toBe("QUEUED");
+    expect(snapshot.proofSent).toBe(false);
+  });
+
+  it("keeps final economics cumulative across multiple linked reservices", () => {
+    let snapshot = transition(fieldProofReady(false), {
+      type: "COMPLETE_JOB",
+    });
+    snapshot = applyWorkflowCommand(snapshot, {
+      type: "RECORD_RESERVICE",
+      commandId: "command-reservice-0001",
+      expectedVersion: snapshot.version,
+      reserviceJobId: "JOB-RESERVICE-1",
+      reason: "Customer reported continued activity.",
+      directCostCents: 1_200,
+    });
+    snapshot = applyWorkflowCommand(snapshot, {
+      type: "RECORD_RESERVICE",
+      commandId: "command-reservice-0002",
+      expectedVersion: snapshot.version,
+      reserviceJobId: "JOB-RESERVICE-2",
+      reason: "A second treatment visit was required.",
+      directCostCents: 800,
+    });
+
+    expect(snapshot.actualReserviceCostCents).toBe(2_000);
+    expect(snapshot.finalEconomics?.actualReserviceCostCents).toBe(2_000);
+  });
+
+  it("rejects a job linked as its own reservice", () => {
+    const snapshot = transition(fieldProofReady(false), {
+      type: "COMPLETE_JOB",
+    });
+
+    expect(() =>
+      applyWorkflowCommand(snapshot, {
+        type: "RECORD_RESERVICE",
+        commandId: "command-reservice-self",
+        expectedVersion: snapshot.version,
+        reserviceJobId: snapshot.jobId,
+        reason: "Invalid self-reference.",
+        directCostCents: 1_200,
+      }),
+    ).toThrow("cannot be linked as its own reservice");
+  });
+
+  it("never lets a customer-confirmation label bypass actor separation", () => {
+    const ready = fieldProofReady(false);
+    const completed = applyWorkflowCommand(
+      ready,
+      {
+        type: "COMPLETE_JOB",
+        commandId: "command-complete-same-actor",
+        expectedVersion: ready.version,
+        actualDriveMinutes: 11,
+        actualMaterialCostCents: 800,
+        technicianNote: "Inspection documentation completed.",
+      },
+      "2026-07-24T12:00:00.000Z",
+      { actorId: "USER-SAME-ACTOR" },
+    );
+
+    expect(() =>
+      applyWorkflowCommand(
+        completed,
+        {
+          type: "VERIFY_OUTCOME",
+          commandId: "command-verify-same-actor",
+          expectedVersion: completed.version,
+          result: "RESOLVED",
+          source: "CUSTOMER_CONFIRMATION",
+          note: "The actor claims the customer confirmed resolution.",
+        },
+        "2026-07-31T12:00:00.000Z",
+        {
+          verifierId: "USER-SAME-ACTOR",
+          verifiedAt: "2026-07-31T12:00:00.000Z",
+        },
+      ),
+    ).toThrow("must be independent");
   });
 
   it("uses optimistic versions and resets state without rewinding version", () => {
@@ -144,6 +225,8 @@ describe("server-authoritative workflow reducer", () => {
     expect(() =>
       applyWorkflowCommand(initial(), {
         type: "RESOLVE_EXCEPTION",
+        ownerUserId: "USER-OWNER",
+        resolutionNote: "No exception can be resolved before completion.",
         commandId: "command-exception-0001",
         expectedVersion: 1,
       }),
@@ -153,13 +236,13 @@ describe("server-authoritative workflow reducer", () => {
 
 describe("request identity boundary", () => {
   it("allows the localhost demo identity only on a loopback URL", () => {
-    const local = getRequestContext(
+    const local = getRequestIdentity(
       new Request("http://localhost:3000/api/v1/workflow"),
     );
-    expect(local?.actorId).toBe("owner@northstar.demo");
+    expect(local?.email).toBe("owner@northstar.demo");
     expect(local?.isLocalDemo).toBe(true);
 
-    const remote = getRequestContext(
+    const remote = getRequestIdentity(
       new Request("https://fieldproof.example/api/v1/workflow", {
         headers: { host: "localhost:3000" },
       }),
@@ -168,7 +251,7 @@ describe("request identity boundary", () => {
   });
 
   it("derives the tenant and actor from platform authentication headers", () => {
-    const context = getRequestContext(
+    const context = getRequestIdentity(
       new Request("https://fieldproof.example/api/v1/workflow", {
         headers: {
           "oai-authenticated-user-email": "Owner@Northstar.Example",
@@ -180,10 +263,8 @@ describe("request identity boundary", () => {
     );
 
     expect(context).toMatchObject({
-      organizationId: "ORG-NORTHSTAR",
-      actorId: "owner@northstar.example",
-      actorDisplayName: "Avery Owner",
-      technicianId: "TECH-04",
+      email: "owner@northstar.example",
+      displayName: "Avery Owner",
       isLocalDemo: false,
     });
   });
@@ -285,6 +366,12 @@ function addEvidence(snapshot: WorkflowSnapshot, sequence: number) {
   const record: EvidenceRecord = {
     id: `EV-00000000-0000-4000-8000-00000000000${sequence}`,
     kind: "FIELD_PHOTO",
+    phase: sequence === 1 ? "BEFORE" : "DURING",
+    subject: sequence === 1 ? "AREA_OVERVIEW" : "ENTRY_POINT",
+    caption:
+      sequence === 1
+        ? "Basement work-area overview before inspection."
+        : "Documented and sealed utility entry point.",
     contentType: "image/jpeg",
     sha256: `${sequence}`.repeat(64),
     capturedAt: 1_721_822_400_000 + sequence,
