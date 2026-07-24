@@ -10,12 +10,13 @@ Browser ↔ application API; API ↔ D1/R2; provider adapters ↔ external syste
 
 ## Priority threats and controls
 
-- **Tenant isolation:** server-derived organization scope, membership checks, organization ID on tenant records, cross-tenant tests, no client-authoritative tenant selection.
+- **Tenant isolation:** custom Sites access policy, server-derived pilot organization scope, organization ID on tenant records, strict command schemas, and no client-authoritative tenant or actor selection. Full multi-organization membership resolution remains required before external customer use.
 - **Prompt injection:** untrusted-content separation, schema validation, allowlisted actions, deterministic policy, post-model authorization.
-- **File upload:** strict MIME/size checks, random object keys, SHA-256 metadata, private R2, signed retrieval, production malware scanning and content sniffing.
+- **File upload:** size checks, magic-byte content detection, random object keys, stable idempotency, SHA-256 metadata, assignment checks, private R2, authenticated tenant-scoped retrieval, cleanup after failed metadata persistence, and production malware scanning.
 - **Authorization:** platform authentication, role/permission services, server-side checks, short sessions, SameSite/HTTP-only cookies where app sessions are added.
+- **Cross-site writes:** JSON-only workflow commands, matching body/header idempotency keys, origin and Fetch Metadata checks, and a required custom header for evidence uploads.
 - **Integration:** scoped secrets, idempotency keys, signature validation, retry ceilings, dead-letter review, sync audit events.
-- **Audit integrity:** append-only records, restricted delete rights, correlation IDs, outbox delivery, production log export/WORM retention.
+- **Audit integrity:** authoritative services emit append-only records with server-derived actors, correlation IDs, and idempotent outbox records. A production outbox consumer plus log export/WORM retention remain required.
 - **Privacy:** minimum necessary fields, retention controls, signed evidence access, no facial recognition or protected-attribute inference.
 
 ## Threat actors

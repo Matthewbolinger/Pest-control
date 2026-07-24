@@ -4,10 +4,10 @@ The deployable MVP targets Cloudflare Workers through Vinext, with D1 for relati
 
 Production hardening should add:
 
-- environment-specific access policies and explicit organization membership;
+- environment-specific access policies and the complete organization membership lifecycle;
 - centralized secrets, alerting, log export, backups, and restore drills;
 - managed rate limits and malware scanning;
-- queue/dead-letter infrastructure for longer-running jobs;
+- an outbox consumer with retry, backoff, leasing, and dead-letter review;
 - real provider adapters and reconciliation;
 - formal security, accessibility, privacy, and legal reviews.
 

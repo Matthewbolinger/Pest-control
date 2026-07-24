@@ -26,7 +26,8 @@ test("builds the FieldProof operations product", async () => {
 test("keeps responsive and accessible product structure in the build", async () => {
   const { application, css } = await builtArtifacts();
   assert.match(application, /Primary navigation/i);
-  assert.match(application, /Operational metrics/i);
+  assert.match(application, /Live pilot metrics/i);
+  assert.match(application, /server-confirmed/i);
   assert.match(application, /aria-label/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /@media print/);
