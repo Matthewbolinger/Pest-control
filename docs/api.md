@@ -5,10 +5,12 @@ The API is versioned under `/api/v1`. The running OpenAPI document is available 
 Implemented endpoints:
 
 - `GET /api/v1/health` — service and queue state.
-- `GET /api/v1/audit` — tenant-scoped audit trace.
-- `POST /api/v1/audit` — validated immutable event plus outbox record.
-- `POST /api/v1/evidence` — JPEG/PNG/WebP evidence upload with file-size validation, SHA-256 integrity metadata, tenant/job/property/zone/technician attribution, and R2 storage.
+- `GET /api/v1/workflow` — load or initialize the authenticated tenant's versioned Huntley workflow.
+- `POST /api/v1/workflow` — apply an ordered, idempotent workflow command with optimistic version enforcement.
+- `GET /api/v1/audit` — authenticated, tenant-scoped authoritative audit trace.
+- `GET /api/v1/evidence?id=…` — authorized private evidence retrieval.
+- `POST /api/v1/evidence` — JPEG/PNG/WebP upload with real-byte content detection, size validation, SHA-256 integrity metadata, stable idempotency, assignment checks, tenant/job/property/zone/technician attribution, D1 metadata, and R2 bytes.
 
 Errors include `code`, human-readable `message`, and `correlationId`. Validation failures do not leak internal state.
 
-The production API expansion follows the route inventory in the master product brief. Route handlers must call tenant-scoped application services rather than query across organizations.
+Workflow commands never accept tenant or actor fields. Identity is derived from trusted platform headers, with a localhost-only fictional identity for development. The production API expansion follows the route inventory in the master product brief.

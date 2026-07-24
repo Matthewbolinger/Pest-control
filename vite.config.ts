@@ -53,6 +53,9 @@ export default defineConfig(async () => {
       cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: localBindingConfig,
+        persistState: process.env.FIELDPROOF_E2E_STATE
+          ? { path: process.env.FIELDPROOF_E2E_STATE }
+          : true,
       }),
     ],
   };

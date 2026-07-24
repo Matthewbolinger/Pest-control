@@ -105,33 +105,67 @@ export function rankScheduleCandidates(candidates: CandidateInput[]): RankedCand
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 }
 
-export type RiskInputs = {
-  relatedIssues: number;
-  reserviceEvents90Days: number;
-  openRisks: number;
-  missingEvidence: boolean;
-  incompleteSteps: boolean;
-  priorUnresolvedOutcome: boolean;
-  followUpOverdue: boolean;
-  uncertaintyFlag: boolean;
-};
+export const RiskInputsSchema = z.object({
+  relatedIssues: z.number().int().nonnegative(),
+  reserviceEvents90Days: z.number().int().nonnegative(),
+  openRisks: z.number().int().nonnegative(),
+  missingEvidence: z.boolean(),
+  incompleteSteps: z.boolean(),
+  priorUnresolvedOutcome: z.boolean(),
+  followUpOverdue: z.boolean(),
+  uncertaintyFlag: z.boolean(),
+});
+
+export type RiskInputs = z.infer<typeof RiskInputsSchema>;
 
 export function calculateRecurrenceRisk(input: RiskInputs) {
+  const parsed = RiskInputsSchema.parse(input);
   const contributions = [
-    { key: "baseline", label: "Rodent inspection baseline", points: 18 },
-    { key: "relatedIssues", label: "Prior related issues", points: Math.min(input.relatedIssues * 7, 21) },
-    { key: "reservice", label: "Recent reservice events", points: Math.min(input.reserviceEvents90Days * 12, 24) },
-    { key: "openRisks", label: "Open property risks", points: Math.min(input.openRisks * 14, 28) },
-    { key: "missingEvidence", label: "Missing evidence", points: input.missingEvidence ? 12 : 0 },
-    { key: "incompleteSteps", label: "Incomplete playbook", points: input.incompleteSteps ? 15 : 0 },
-    { key: "priorUnresolved", label: "Prior unresolved outcome", points: input.priorUnresolvedOutcome ? 12 : 0 },
-    { key: "followUp", label: "Follow-up overdue", points: input.followUpOverdue ? 9 : 0 },
-    { key: "uncertainty", label: "Technician uncertainty", points: input.uncertaintyFlag ? 8 : 0 },
+    { key: "baseline", label: "Rodent recurrence baseline", points: 25 },
+    { key: "relatedIssues", label: "Prior related issues", points: Math.min(parsed.relatedIssues * 7, 21) },
+    { key: "reservice", label: "Recent reservice events", points: Math.min(parsed.reserviceEvents90Days * 12, 24) },
+    { key: "openRisks", label: "Confirmed open property risks", points: Math.min(parsed.openRisks * 15, 30) },
+    { key: "priorUnresolved", label: "Prior unresolved outcome", points: parsed.priorUnresolvedOutcome ? 12 : 0 },
+    { key: "followUp", label: "Follow-up overdue", points: parsed.followUpOverdue ? 9 : 0 },
   ];
+  const rawScore = contributions.reduce((total, item) => total + item.points, 0);
+  const gaps = [
+    {
+      key: "missingEvidence",
+      label: "Required evidence has not been captured",
+      penalty: parsed.missingEvidence ? 30 : 0,
+    },
+    {
+      key: "incompleteSteps",
+      label: "Required playbook steps are incomplete",
+      penalty: parsed.incompleteSteps ? 30 : 0,
+    },
+    {
+      key: "uncertainty",
+      label: "Technician marked the assessment uncertain",
+      penalty: parsed.uncertaintyFlag ? 20 : 0,
+    },
+  ].filter((item) => item.penalty > 0);
+  const completenessScore = Math.max(
+    0,
+    100 - gaps.reduce((total, item) => total + item.penalty, 0),
+  );
+
   return {
-    score: Math.min(100, contributions.reduce((total, item) => total + item.points, 0)),
-    version: "rodent-risk-v1.2",
+    score: Math.min(100, rawScore),
+    rawScore,
+    version: "rodent-risk-v2.0",
     contributions: contributions.filter((item) => item.points > 0),
+    dataCompleteness: {
+      score: completenessScore,
+      status:
+        completenessScore === 100
+          ? ("COMPLETE" as const)
+          : completenessScore >= 70
+            ? ("PARTIAL" as const)
+            : ("LIMITED" as const),
+      gaps,
+    },
   };
 }
 
@@ -152,13 +186,24 @@ export function calculatePropertyCompleteness(fields: Record<string, boolean>) {
   };
 }
 
-const allowedActionTypes = new Set([
-  "TRIAGE_REQUEST",
-  "PROPOSE_APPOINTMENT",
-  "APPROVE_APPOINTMENT",
-  "CREATE_FOLLOW_UP",
-  "GENERATE_REPORT",
-]);
+const actionPolicies = {
+  TRIAGE_REQUEST: { effect: "READ_ONLY" },
+  PROPOSE_APPOINTMENT: { effect: "READ_ONLY" },
+  APPROVE_APPOINTMENT: { effect: "WRITE" },
+  CREATE_FOLLOW_UP: { effect: "WRITE" },
+  GENERATE_REPORT: { effect: "WRITE" },
+} as const;
+
+export const ActionApprovalSchema = z.object({
+  id: z.string().min(1),
+  actionType: z.string().min(1),
+  actorId: z.string().min(1),
+  tenantMatch: z.boolean(),
+  grantedAt: z.string().min(1),
+  expiresAt: z.string().min(1),
+});
+
+export type ActionApproval = z.infer<typeof ActionApprovalSchema>;
 
 export function evaluateActionPolicy(input: {
   actionType: string;
@@ -166,25 +211,96 @@ export function evaluateActionPolicy(input: {
   confidence: number;
   expiresAt: string;
   tenantMatch: boolean;
+  approval?: ActionApproval;
+  evaluatedAt?: string;
 }) {
-  if (!allowedActionTypes.has(input.actionType)) {
-    return { allowed: false, requiresApproval: true, reason: "Unknown action type rejected." };
+  const action = actionPolicies[input.actionType as keyof typeof actionPolicies];
+  if (!action) {
+    return policyDenial("UNKNOWN_ACTION", "Unknown action type rejected.", false);
+  }
+  if (!AutonomyLevelSchema.safeParse(input.autonomyLevel).success) {
+    return policyDenial("INVALID_AUTONOMY", "Unknown autonomy level rejected.", false, action.effect);
   }
   if (!input.tenantMatch) {
-    return { allowed: false, requiresApproval: true, reason: "Tenant scope mismatch." };
+    return policyDenial("TENANT_MISMATCH", "Tenant scope mismatch.", false, action.effect);
   }
-  if (new Date(input.expiresAt).getTime() <= Date.now()) {
-    return { allowed: false, requiresApproval: true, reason: "Proposal expired." };
+  if (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1) {
+    return policyDenial("INVALID_CONFIDENCE", "Confidence must be between 0 and 1.", false, action.effect);
+  }
+
+  const evaluatedAt = input.evaluatedAt ? new Date(input.evaluatedAt).getTime() : Date.now();
+  const expiresAt = new Date(input.expiresAt).getTime();
+  if (!Number.isFinite(evaluatedAt) || !Number.isFinite(expiresAt)) {
+    return policyDenial("INVALID_TIME", "Policy timestamps are invalid.", false, action.effect);
+  }
+  if (expiresAt <= evaluatedAt) {
+    return policyDenial("EXPIRED", "Proposal expired.", false, action.effect);
   }
   if (input.confidence < 0.65) {
-    return { allowed: false, requiresApproval: true, reason: "Confidence below policy threshold." };
+    return policyDenial(
+      "LOW_CONFIDENCE",
+      "Confidence below policy threshold.",
+      false,
+      action.effect,
+    );
   }
+
+  const approvalRequired =
+    action.effect === "WRITE" || input.autonomyLevel === "HUMAN_REQUIRED";
+  if (approvalRequired) {
+    const approval = ActionApprovalSchema.safeParse(input.approval);
+    if (!approval.success) {
+      return policyDenial(
+        "APPROVAL_REQUIRED",
+        "A valid human approval is required before this action can execute.",
+        true,
+        action.effect,
+      );
+    }
+    const approvalGrantedAt = new Date(approval.data.grantedAt).getTime();
+    const approvalExpiresAt = new Date(approval.data.expiresAt).getTime();
+    const approvalMatches =
+      approval.data.actionType === input.actionType &&
+      approval.data.tenantMatch &&
+      Number.isFinite(approvalGrantedAt) &&
+      Number.isFinite(approvalExpiresAt) &&
+      approvalGrantedAt <= evaluatedAt &&
+      approvalExpiresAt > evaluatedAt;
+    if (!approvalMatches) {
+      return policyDenial(
+        "INVALID_APPROVAL",
+        "Human approval is invalid, expired, or outside the action scope.",
+        true,
+        action.effect,
+      );
+    }
+  }
+
   return {
     allowed: true,
-    requiresApproval:
-      input.autonomyLevel === "SUGGEST_ONLY" ||
-      input.actionType === "APPROVE_APPOINTMENT",
-    reason: "Policy fieldproof-ops-v1.3 satisfied.",
+    requiresApproval: false,
+    approvalRequired,
+    reason: "Policy fieldproof-ops-v2.0 satisfied.",
+    code: "ALLOWED" as const,
+    effect: action.effect,
+    policyVersion: "fieldproof-ops-v2.0",
+  };
+}
+
+function policyDenial(
+  code: string,
+  reason: string,
+  requiresApproval: boolean,
+  effect?: "READ_ONLY" | "WRITE",
+) {
+  return {
+    allowed: false,
+    requiresApproval,
+    approvalRequired: requiresApproval,
+    reason,
+    code,
+    effect,
+    policyVersion: "fieldproof-ops-v2.0",
   };
 }
 

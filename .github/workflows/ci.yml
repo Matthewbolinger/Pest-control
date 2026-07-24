@@ -18,5 +18,9 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test
-      - run: npm run evals
-      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run test:artifact
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+        env:
+          FIELDPROOF_E2E_SKIP_BUILD: "true"

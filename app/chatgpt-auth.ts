@@ -19,7 +19,20 @@ const CALLBACK_PATH = "/callback";
 export async function getChatGPTUser(): Promise<ChatGPTUser | null> {
   const requestHeaders = await headers();
   const email = requestHeaders.get(USER_EMAIL_HEADER);
-  if (!email) return null;
+  if (!email) {
+    const host = requestHeaders.get("host") ?? "";
+    if (
+      process.env.NODE_ENV !== "production" &&
+      isLoopbackHost(host)
+    ) {
+      return {
+        displayName: "Local Demo Owner",
+        email: "owner@northstar.demo",
+        fullName: "Local Demo Owner",
+      };
+    }
+    return null;
+  }
 
   const encodedFullName = requestHeaders.get(USER_FULL_NAME_HEADER);
   const fullName =
@@ -83,4 +96,16 @@ function safeDecodeURIComponent(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized.startsWith("localhost:") ||
+    normalized === "127.0.0.1" ||
+    normalized.startsWith("127.0.0.1:") ||
+    normalized === "[::1]" ||
+    normalized.startsWith("[::1]:")
+  );
 }

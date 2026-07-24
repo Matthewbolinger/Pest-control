@@ -27,16 +27,86 @@ export class MockAIProvider implements AIProvider {
 
   async triageServiceRequest(input: { description: string; propertyFacts: string[] }) {
     const untrusted = input.description.toLowerCase();
-    const injection = /ignore (all|your)|system prompt|refund me|tool call/.test(untrusted);
+    const injection = /ignore (all|your)|system prompt|tool call/.test(untrusted);
+    const rodentSignal =
+      /\b(mice|mouse|rodent)\b/.test(untrusted) ||
+      /\b(mose|dropings|basment)\b/.test(untrusted);
+    const unsupportedProperty =
+      /\b(commercial|warehouse|restaurant|industrial)\b/.test(untrusted);
+    const outsideTerritory = /outside (your|the) (service )?territory/.test(untrusted);
+    const unauthorizedAction =
+      /\b(refund|discount|make me an admin|price to|book .* twice|unapproved .*treatment)\b/.test(
+        untrusted,
+      );
+    const crossTenantRequest =
+      /another (company|organization)|other (company|organization).*(customer|record)/.test(
+        untrusted,
+      );
+    const regulatoryClaim = /complies? with every law|regulatory guarantee/.test(untrusted);
+    const quoteRequest = /\b(quote|pricebook|price)\b/.test(untrusted);
+    const chemicalRequest = /\b(chemical|mix|mixing rate|pesticide)\b/.test(untrusted);
+    const safetySensitive = /\b(child|daughter|pet|dog|cat)\b/.test(untrusted);
+    const lowInformation =
+      /maybe something|signs of something|tiny sound/.test(untrusted) &&
+      !rodentSignal;
+
+    const issueCategory = unsupportedProperty
+      ? "UNSUPPORTED"
+      : rodentSignal
+        ? "RODENT"
+        : "GENERAL_PEST";
+    const ambiguity = [
+      ...(injection
+        ? ["Customer message contained instruction-like text; ignored by policy."]
+        : []),
+      ...(outsideTerritory
+        ? ["Property appears outside the configured service territory."]
+        : []),
+      ...(unsupportedProperty
+        ? ["Commercial properties are outside the residential MVP scope."]
+        : []),
+      ...(unauthorizedAction
+        ? ["Requested business action requires separate human authorization."]
+        : []),
+      ...(crossTenantRequest
+        ? ["Cross-organization data access is not permitted."]
+        : []),
+      ...(regulatoryClaim
+        ? ["Regulatory claims require approved source material and human review."]
+        : []),
+      ...(quoteRequest
+        ? ["Pricing requires a configured pricebook lookup."]
+        : []),
+      ...(lowInformation
+        ? ["The issue cannot be classified confidently from the supplied description."]
+        : []),
+    ];
+    const safetyFlags = [
+      ...(chemicalRequest ? ["CHEMICAL_GUIDANCE_REQUEST_REQUIRES_HUMAN_REVIEW"] : []),
+      ...(safetySensitive ? ["CHILD_OR_PET_CONTEXT_REQUIRES_HUMAN_REVIEW"] : []),
+    ];
     const result = {
-      issueCategory: untrusted.includes("mice") || untrusted.includes("mouse") ? "RODENT" : "GENERAL_PEST",
-      serviceType: "Rodent Entry-Point Inspection",
+      issueCategory,
+      serviceType:
+        issueCategory === "RODENT"
+          ? "Rodent Entry-Point Inspection"
+          : issueCategory === "GENERAL_PEST"
+            ? "General Pest Inspection"
+            : "Unsupported service — human review",
       affectedZones: untrusted.includes("basement") ? ["Basement"] : ["Other"],
-      urgency: untrusted.includes("child") || untrusted.includes("pet") ? "PRIORITY" : "ROUTINE",
-      safetyFlags: [],
-      confidence: injection ? 0.67 : 0.94,
-      serviceable: true,
-      ambiguity: injection ? ["Customer message contained instruction-like text; ignored by policy."] : [],
+      urgency: safetySensitive || /\b(today|tonight|soon)\b/.test(untrusted) ? "PRIORITY" : "ROUTINE",
+      safetyFlags,
+      confidence: lowInformation ? 0.48 : injection || unsupportedProperty || outsideTerritory ? 0.67 : 0.94,
+      serviceable:
+        !unsupportedProperty &&
+        !outsideTerritory &&
+        !lowInformation &&
+        !injection &&
+        !unauthorizedAction &&
+        !crossTenantRequest &&
+        !regulatoryClaim &&
+        !chemicalRequest,
+      ambiguity,
       sourceFacts: [input.description, ...input.propertyFacts],
     } satisfies TriageResult;
     return TriageResultSchema.parse(result);
@@ -70,12 +140,39 @@ export class MockAIProvider implements AIProvider {
   }
 }
 
-export class OpenAICompatibleProvider extends MockAIProvider {
-  readonly name = "openai-compatible";
-  readonly version = "configured-at-runtime";
+abstract class UnconfiguredRemoteProvider implements AIProvider {
+  abstract readonly name: string;
+  readonly version = "not-configured";
+
+  protected unavailable(): never {
+    throw new Error(`${this.name} is declared but not configured. Use MockAIProvider until a real adapter is installed.`);
+  }
+
+  async triageServiceRequest(): Promise<TriageResult> {
+    return this.unavailable();
+  }
+
+  async generateJobBrief(): Promise<z.infer<typeof JobBriefSchema>> {
+    return this.unavailable();
+  }
+
+  async normalizeTechnicianNotes(): Promise<{ normalized: string; unsupportedClaims: string[] }> {
+    return this.unavailable();
+  }
+
+  async summarizeException(): Promise<string> {
+    return this.unavailable();
+  }
+
+  async generateCustomerReportNarrative(): Promise<string> {
+    return this.unavailable();
+  }
 }
 
-export class AnthropicCompatibleProvider extends MockAIProvider {
+export class OpenAICompatibleProvider extends UnconfiguredRemoteProvider {
+  readonly name = "openai-compatible";
+}
+
+export class AnthropicCompatibleProvider extends UnconfiguredRemoteProvider {
   readonly name = "anthropic-compatible";
-  readonly version = "configured-at-runtime";
 }

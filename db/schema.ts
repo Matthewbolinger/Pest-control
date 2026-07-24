@@ -143,6 +143,7 @@ export const observations = sqliteTable("observations", {
 export const evidenceAssets = sqliteTable("evidence_assets", {
   id: text("id").primaryKey(),
   organizationId: text("organization_id").notNull(),
+  idempotencyKey: text("idempotency_key"),
   jobId: text("job_id").notNull(),
   propertyId: text("property_id").notNull(),
   zoneId: text("zone_id").notNull(),
@@ -153,7 +154,12 @@ export const evidenceAssets = sqliteTable("evidence_assets", {
   sha256: text("sha256").notNull(),
   capturedAt: integer("captured_at", { mode: "timestamp_ms" }).notNull(),
   ...auditColumns,
-});
+}, (table) => [
+  uniqueIndex("evidence_assets_tenant_idempotency_idx").on(
+    table.organizationId,
+    table.idempotencyKey,
+  ),
+]);
 
 export const followUps = sqliteTable("follow_ups", {
   id: text("id").primaryKey(),
@@ -247,3 +253,39 @@ export const outboxEvents = sqliteTable("outbox_events", {
   availableAt: integer("available_at", { mode: "timestamp_ms" }).notNull(),
   ...auditColumns,
 }, (table) => [uniqueIndex("outbox_idempotency_idx").on(table.idempotencyKey)]);
+
+export const workflowSnapshots = sqliteTable("workflow_snapshots", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  serviceRequestId: text("service_request_id").notNull(),
+  jobId: text("job_id").notNull(),
+  propertyId: text("property_id").notNull(),
+  assignedTechnicianId: text("assigned_technician_id"),
+  snapshotJson: text("snapshot_json").notNull(),
+  lastCommandId: text("last_command_id"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  version: integer("version").notNull().default(1),
+}, (table) => [
+  uniqueIndex("workflow_snapshots_tenant_job_idx").on(
+    table.organizationId,
+    table.jobId,
+  ),
+]);
+
+export const workflowCommandReceipts = sqliteTable("workflow_command_receipts", {
+  id: text("id").primaryKey(),
+  organizationId: text("organization_id").notNull(),
+  workflowId: text("workflow_id").notNull(),
+  commandId: text("command_id").notNull(),
+  commandType: text("command_type").notNull(),
+  requestJson: text("request_json").notNull(),
+  responseJson: text("response_json").notNull(),
+  appliedVersion: integer("applied_version").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+}, (table) => [
+  uniqueIndex("workflow_receipts_tenant_command_idx").on(
+    table.organizationId,
+    table.commandId,
+  ),
+]);
