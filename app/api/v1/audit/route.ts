@@ -1,13 +1,17 @@
 import { env } from "cloudflare:workers";
 import {
+  authorizePermission,
+  contextDenied,
   getRequestContext,
-  unauthorized,
 } from "@/app/api/v1/request-context";
 
 export async function GET(request: Request) {
   const correlationId = crypto.randomUUID();
-  const context = getRequestContext(request);
-  if (!context) return unauthorized(correlationId);
+  const resolution = await getRequestContext(request, env.DB);
+  if (!resolution.context) return contextDenied(resolution, correlationId);
+  const context = resolution.context;
+  const denied = authorizePermission(context, "AUDIT_READ", correlationId);
+  if (denied) return denied;
 
   try {
     const result = await env.DB.prepare(
@@ -28,8 +32,8 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   const correlationId = crypto.randomUUID();
-  const context = getRequestContext(request);
-  if (!context) return unauthorized(correlationId);
+  const resolution = await getRequestContext(request, env.DB);
+  if (!resolution.context) return contextDenied(resolution, correlationId);
 
   return Response.json(
     {

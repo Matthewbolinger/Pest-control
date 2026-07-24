@@ -2,21 +2,40 @@
 
 Every service visit should make the next one smarter.
 
-FieldProof is an AI-native service-outcome and margin operating layer for residential pest-control companies. This pilot connects a customer request to structured triage, explicit human approval, deterministic serviceability, margin-aware scheduling, a sourced technician brief, field evidence, a server-enforced completion policy, Service Proof, property risk, follow-up, contribution economics, and an authoritative audit trace.
+FieldProof is a vendor-neutral outcome-assurance and margin operating layer for
+residential pest-control companies. It is designed to sit beside a field-service
+management system (FSM), not replace one. The current pilot connects a customer
+request to structured triage, explicit human approval, deterministic
+serviceability, margin-aware scheduling, a sourced technician brief, typed field
+evidence, server-enforced completion assurance, immutable Service Proof,
+independent outcome verification, reservice attribution, and an authoritative
+audit trace.
+
+Field completion is not resolution. Completing the approved field work creates
+a `PENDING_VERIFICATION` outcome. A separately authorized, attributable signal
+is required to record the verified result, and a later reservice remains linked
+to the original job and its final economics.
 
 ## Architecture
 
 - Vinext / React / TypeScript operations application
 - Cloudflare Worker-compatible server routes
-- D1 tenant-scoped structured records
-- R2 private evidence objects
-- Drizzle schema and migrations
-- Zod input/output validation
-- Provider-neutral AI and integration contracts
-- D1-backed versioned workflow snapshots and idempotent commands
-- IndexedDB only for unconfirmed technician drafts and upload retry
+- D1 tenant-scoped normalized records and versioned workflow projections
+- R2 private evidence objects with content validation and SHA-256 metadata
+- Database-backed users, organization memberships, roles, permissions, and
+  assigned-technician enforcement
+- Versioned evidence policies and immutable playbook assignments
+- Expected, actual, and final contribution economics
+- Durable outbox, proof-delivery, integration-sync, and reconciliation records
+- Provider-neutral AI and FSM/communications adapter contracts
+- IndexedDB operation journal with ordered replay, idempotency, leases,
+  attachment durability, retry/backoff, auth blocking, and conflict recovery
+- PWA registration that caches only allowlisted public assets; authenticated
+  HTML, API responses, evidence, and other private content remain network-only
 
-See [architecture](docs/architecture.md), [data model](docs/data-model.md), and [assumptions](docs/assumptions.md).
+See [architecture](docs/architecture.md), [data model](docs/data-model.md),
+[competitive analysis](docs/competitive-analysis.md), and
+[assumptions](docs/assumptions.md).
 
 ## Prerequisites
 
@@ -32,7 +51,8 @@ npm run db:generate
 npm run dev
 ```
 
-The local runtime supplies D1 and R2-compatible bindings. No paid AI, maps, communications, or field-service credentials are required.
+The local runtime supplies D1- and R2-compatible bindings. No paid AI, maps,
+communications, or FSM credentials are required for the deterministic pilot.
 
 ## Commands
 
@@ -41,49 +61,86 @@ npm run dev
 npm run lint
 npm run typecheck
 npm run test
-npm run test:artifact
-npm run test:e2e
 npm run evals
 npm run build
+npm run test:artifact
+npm run test:e2e
 ```
 
-## Identity and pilot scope
+## Identity and authorization
 
-The deployed pilot is protected by platform identity. Browser pages and API writes reject missing hosted identity; localhost receives a clearly marked fictional demo identity. The current deployment is a single-tenant Northstar pilot, and every server query derives its organization and actor instead of accepting them from the client.
+Hosted pages and API writes require platform identity. Localhost uses explicitly
+fictional personas for role and assignment tests. Each request resolves a
+database-backed active user and organization membership; permissions are
+default-deny by role, and technician field writes require the membership's
+linked technician to match the assigned job.
 
-Broader organization membership lifecycle and role administration remain production-hardening work; the UI no longer presents a role preview as authorization.
+The deployed experience is still a private Northstar pilot. It automatically
+provisions its hosted pilot owner and does not yet provide customer-facing
+invitation, role-administration, suspension, or removal screens. Those
+administrative lifecycle controls must be completed before a shared production
+rollout.
 
 ## Demo workflow
 
-Use the priority Morrison request on the Control Tower:
+Use the priority Morrison request:
 
-1. Generate a validated triage proposal.
-2. Record explicit human triage approval.
-3. Compare candidates and approve a ranked slot.
-4. Check in as the assigned technician.
-5. Complete four server-confirmed inspection steps.
-6. Upload two attributable evidence images and record the basement observation.
-7. Review the risk as clear or unresolved.
-8. Complete the job and review the server-generated Service Proof.
-9. Queue the Service Proof delivery request, reload, and confirm the assignment, outcome, risk, proof, and audit trace persist.
+1. Generate a validated triage proposal and record explicit human approval.
+2. Compare ranked candidates and approve Maya Chen at 1:30 PM
+   (`SC-2401 · TECH-04`).
+3. Check in as the assigned technician and complete four confirmed steps.
+4. Upload a `BEFORE / AREA_OVERVIEW` image and a
+   `DURING / ENTRY_POINT` image, then record a structured observation.
+5. Review risk and enter actual drive time, material cost, and completion note.
+6. Mark field work complete. Confirm the outcome is still
+   `PENDING_VERIFICATION` and inspect the immutable Service Proof hash.
+7. Queue proof delivery and process it with the deterministic mock
+   communications adapter. Queued is not delivered; only the adapter receipt
+   changes the delivery to `DELIVERED`.
+8. Record a separately attributable customer-confirmed outcome. Optionally link
+   a reservice and its direct cost to see final contribution change.
+9. Inspect Playbooks, Outcomes, Integrations, Exceptions, Audit, and health
+   telemetry, then reload to confirm authoritative state persists.
 
 See the full [demo script](docs/demo-script.md).
 
-## Environment variables
+## Offline and PWA behavior
 
-The main demo uses `AI_PROVIDER=mock`. Optional provider-compatible variables are documented in `.env.example`. Production secrets belong in the hosted secret manager, never source control.
+Field commands and evidence are written to an actor-, organization-, and
+job-scoped IndexedDB journal before network submission. Confirmed server
+versions remain authoritative; offline data cannot satisfy the server
+completion policy until replay succeeds. Retries reuse the same idempotency
+keys, preserve dependency order, and stop for authentication or human recovery
+when required.
 
-## Database and seed data
+The service worker never caches personalized navigation responses, API data,
+auth routes, or evidence. A cold offline navigation shows a neutral offline
+page; queued field work remains on the device and resumes only after the signed-
+in application reconnects. Signing out purges FieldProof caches and local
+journals.
 
-`npm run db:generate` generates D1 migrations from `db/schema.ts`. Checked-in migrations create the workflow snapshot, command-receipt, evidence, audit, outbox, outcome, margin, and follow-up records used by the pilot. The first authenticated read initializes the fictional Huntley workflow if it does not exist.
+## Environment and persistence
 
-## Troubleshooting
+The pilot uses `AI_PROVIDER=mock`. Optional provider-compatible variables are
+documented in `.env.example`; production secrets belong in the hosted secret
+manager, never source control.
 
-- If the dev port is occupied, the server selects another local port.
-- If a field command or evidence upload is offline, the draft remains in IndexedDB and is clearly excluded from completion until the server confirms it.
-- If schema bindings are missing, confirm `.openai/hosting.json` declares `DB` and `EVIDENCE`.
-- If a build changed dependencies, run `npm install` to refresh the lockfile.
+Checked-in Drizzle migrations create normalized operating records, workflow
+snapshots, command receipts, evidence metadata, outcomes and checkpoints,
+reservice links, economics, proof and delivery records, audit, outbox, and
+integration reconciliation state. The first authorized read initializes the
+fictional Huntley records idempotently.
 
-## Production considerations
+## Production boundary
 
-This is a hardened pilot vertical slice, not the full enterprise scope. The core request-to-proof workflow is now server-authoritative, versioned, idempotent, and browser-tested. Before live customer use, complete the controls in [deployment](docs/deployment.md) and [threat model](docs/threat-model.md), implement the full organization membership lifecycle, add a production outbox consumer, expand provider/integration coverage, and perform formal security, accessibility, privacy, and legal reviews.
+The repository contains a production-shaped pilot, not proof of production
+readiness or market leadership. Mock and CSV contracts are locally testable;
+FieldRoutes, PestPac, and GorillaDesk capabilities remain explicitly
+credential-gated. Proof delivery uses an on-demand mock worker, not a production
+sender.
+
+Live use still requires vendor sandbox credentials, a production communications
+provider and consent flow, real design-partner field trials, calibrated risk and
+outcome windows, and formal security, privacy, accessibility, legal, retention,
+backup/restore, disaster-recovery, and operational reviews. See
+[deployment](docs/deployment.md) and the [master plan](docs/master-plan.md).
